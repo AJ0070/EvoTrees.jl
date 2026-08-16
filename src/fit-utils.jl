@@ -31,6 +31,17 @@ function get_edges(df; feature_names, nbins, rng=Random.MersenneTwister(), kwarg
     nfeats = length(feature_names)
     featbins = Vector{UInt8}(undef, nfeats)
     feattypes = Vector{Bool}(undef, nfeats)
+    # Validated serially and ahead of the threaded loop below: `featbins` is a `UInt8` vector,
+    # so assigning a level count above 255 throws an `InexactError` before this check can run,
+    # and any error raised inside `@threads` reaches the caller wrapped in a `CompositeException`.
+    for j in eachindex(feature_names)
+        col = Tables.getcolumn(df, feature_names[j])
+        if eltype(col) <: CategoricalValue
+            nlevels = length(levels(col))
+            nlevels <= nbins || error("
+            Max categorical levels is limited to `nbins` ($nbins). Feature $(feature_names[j]) has $(nlevels) levels. Consider using larger `nbins`, up to 255.")
+        end
+    end
     @threads for j in eachindex(feature_names)
         col = view(Tables.getcolumn(df, feature_names[j]), idx)
         if eltype(col) <: Bool
@@ -41,8 +52,6 @@ function get_edges(df; feature_names, nbins, rng=Random.MersenneTwister(), kwarg
             edges[j] = levels(col)
             featbins[j] = length(edges[j])
             feattypes[j] = isordered(col) ? true : false
-            featbins[j] <= nbins || error("
-            Max categorical levels is limited to `nbins` ($nbins). Feature $(feature_names[j]) has $(featbins[j]) levels. Consider using larger `nbins`, up to 255.")
         elseif eltype(col) <: Real
             edges[j] = unique(quantile(col, (1:nbins-1) / nbins))
             featbins[j] = length(edges[j]) + 1

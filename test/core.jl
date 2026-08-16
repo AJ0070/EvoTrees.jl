@@ -557,4 +557,21 @@ end
         )
     end
 
+    @testset "categorical cardinality above nbins" begin
+        nobs = 1_000
+        # The level count is validated before it is stored, so the guard fires for any
+        # cardinality rather than tripping over the UInt8 `featbins` conversion first.
+        for K in (100, 256, 400)
+            lv = ["L$i" for i in 1:K]
+            d = (x=categorical(rand(Xoshiro(1), lv, nobs), levels=lv), y=rand(Xoshiro(2), nobs))
+            @test_throws ErrorException fit(
+                EvoTreeRegressor(nrounds=2, max_depth=3, nbins=64), d; target_name="y"
+            )
+        end
+        # Within nbins it still fits.
+        lv = ["L$i" for i in 1:32]
+        d = (x=categorical(rand(Xoshiro(1), lv, nobs), levels=lv), y=rand(Xoshiro(2), nobs))
+        @test fit(EvoTreeRegressor(nrounds=2, max_depth=3, nbins=64), d; target_name="y") isa EvoTrees.EvoTree
+    end
+
 end
