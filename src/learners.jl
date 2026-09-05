@@ -18,6 +18,7 @@ mutable struct EvoTreeRegressor <: MMI.Deterministic
     alphas::Vector{Float64}
     ndcg_k::Int
     monotone_constraints::Dict{Int,Int}
+    ctrl_lambda::Float64
     tree_type::Symbol
     seed::Int
     device::Symbol
@@ -46,6 +47,7 @@ function EvoTreeRegressor(; kwargs...)
         :alphas => [0.1, 0.5, 0.9],
         :ndcg_k => typemax(Int),
         :monotone_constraints => Dict{Int,Int}(),
+        :ctrl_lambda => 0.0,
         :tree_type => :binary,
         :seed => 123,
         :device => :cpu
@@ -115,6 +117,7 @@ function EvoTreeRegressor(; kwargs...)
         alphas,
         args[:ndcg_k],
         args[:monotone_constraints],
+        Float64(args[:ctrl_lambda]),
         tree_type,
         args[:seed],
         device

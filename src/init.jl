@@ -200,7 +200,7 @@ function _init_target(::Type{L}, y_train, params, offset, ::Type{T}) where {L,T}
     return K, y, μ, target_levels, target_isordered
 end
 
-function init_core(params::EvoTypes, ::Type{CPU}, data, feature_names, y_train, w, offset, group=nothing)
+function init_core(params::EvoTypes, ::Type{CPU}, data, feature_names, y_train, w, offset, group=nothing, ctrl=nothing)
 
     # binarize data into quantiles
     rng = Xoshiro(params.seed)
@@ -286,6 +286,7 @@ function init_core(params::EvoTypes, ::Type{CPU}, data, feature_names, y_train, 
         feattypes,
         monotone_constraints,
         group,
+        ctrl,
     )
     return m, cache
 end
@@ -381,7 +382,8 @@ function init(
     feature_names=nothing,
     w_train=nothing,
     offset_train=nothing,
-    group_train=nothing
+    group_train=nothing,
+    ctrl_train=nothing
 )
 
     # initialize model and cache
@@ -396,7 +398,9 @@ function init(
     offset = isnothing(offset_train) ? nothing : V{T}(offset_train)
     group = isnothing(group_train) ? nothing : build_group_index(group_train, nobs, "group_train")
 
-    m, cache = init_core(params, device, x_train, feature_names, y_train, w, offset, group)
+    ctrl = isnothing(ctrl_train) ? nothing : Vector{Float32}(vec(ctrl_train))
+    isnothing(ctrl) || length(ctrl) == nobs || error("`ctrl_train` has length $(length(ctrl)) but there are $nobs observations.")
+    m, cache = init_core(params, device, x_train, feature_names, y_train, w, offset, group, ctrl)
 
     return m, cache
 end

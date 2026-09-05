@@ -6,7 +6,7 @@ Given a instantiate
 function grow_evotree!(m::EvoTree{L,K}, cache::CacheCPU, params::EvoTypes) where {L,K}
 
     # compute gradients
-    update_grads!(cache.∇, cache.pred, cache.y, L, params, cache.group)
+    update_grads!(cache.∇, cache.pred, cache.y, L, params, cache.group, cache.ctrl)
 
     for _ in 1:params.bagging_size
 
@@ -412,13 +412,14 @@ function fit(
     offset_eval=nothing,
     group_train=nothing,
     group_eval=nothing,
+    ctrl_train=nothing,
     feature_names=nothing,
     print_every_n=9999,
     verbosity=1
 )
 
     _device = device_type(params.device)
-    m, cache = init(params, x_train, y_train, _device; feature_names, w_train, offset_train, group_train)
+    m, cache = init(params, x_train, y_train, _device; feature_names, w_train, offset_train, group_train, ctrl_train)
 
     # initialize callback and logger if tracking eval data
     metric = params.metric

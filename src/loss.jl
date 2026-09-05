@@ -104,6 +104,31 @@ end
 update_grads!(∇, p, y, ::Type{L}, params::EvoTypes, group) where {L} =
     update_grads!(∇, p, y, L, params)
 
+# The base objective first, then the decorrelation penalty on top when a control variable
+# was supplied. The penalty is `ctrl_lambda * n * dcov2(p, ctrl)`: scaling by `n` puts its
+# per-observation gradient on the same footing as the base loss, since `dcov2` is a
+# normalised statistic whose gradient is O(1/n) per coordinate. It is piecewise linear in
+# `p`, so only the gradient row moves and the Hessian is untouched, the same shape as `:mae`.
+function update_grads!(∇, p, y, ::Type{L}, params::EvoTypes, group, ctrl) where {L}
+    update_grads!(∇, p, y, L, params, group)
+    isnothing(ctrl) && return nothing
+    λ = hasproperty(params, :ctrl_lambda) ? params.ctrl_lambda : 0.0
+    λ > 0 || return nothing
+    _add_dcor_penalty!(∇, p, ctrl, λ)
+    return nothing
+end
+
+function _add_dcor_penalty!(∇::Matrix{T}, p::Matrix{T}, ctrl::AbstractVector, λ) where {T}
+    size(p, 1) == 1 || error("the decorrelation penalty is defined for a single output")
+    n = size(p, 2)
+    g = dcov2_grad(view(p, 1, :), ctrl)
+    w_row = 2 * size(p, 1) + 1
+    @inbounds for i in 1:n
+        ∇[1, i] += T(λ * n * g[i]) * ∇[w_row, i]
+    end
+    return nothing
+end
+
 # LambdaRank, per Burges' "From RankNet to LambdaRank to LambdaMART". Pairs within a query
 # contribute a pairwise logistic cost weighted by the NDCG change a swap would cause. The
 # lambdas stay per-document, so K = 1 and the histogram and leaf solver are untouched.
