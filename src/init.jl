@@ -400,7 +400,10 @@ function init(
 
     ctrl = isnothing(ctrl_train) ? nothing : Vector{Float32}(vec(ctrl_train))
     isnothing(ctrl) || length(ctrl) == nobs || error("`ctrl_train` has length $(length(ctrl)) but there are $nobs observations.")
-    m, cache = init_core(params, device, x_train, feature_names, y_train, w, offset, group, ctrl)
+    isnothing(ctrl) || device <: CPU || error("`ctrl_train` is only supported on CPU.")
+    m, cache = isnothing(ctrl) ?
+               init_core(params, device, x_train, feature_names, y_train, w, offset, group) :
+               init_core(params, device, x_train, feature_names, y_train, w, offset, group, ctrl)
 
     return m, cache
 end
