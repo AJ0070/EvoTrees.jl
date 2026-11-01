@@ -398,6 +398,8 @@ function _pearson_group_stats(w, y, rows, k)
     return (true, sw, ybar, sy)
 end
 
+_pearson_group_stats(w, y::AbstractVector, rows) = _pearson_group_stats(w, y, rows, 1)
+
 function _pearson_stats_chunk!(stats, scored, w, y, group, chunk, k)
     for g in chunk
         ok, sw, ybar, sy = _pearson_group_stats(w, y, group_rows(group, g), k)
