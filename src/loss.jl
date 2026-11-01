@@ -4,6 +4,7 @@ abstract type MLE2P <: LossType end # 2-parameters max-likelihood
 
 abstract type MSE <: GradientRegression end
 abstract type LambdaRank <: GradientRegression end
+abstract type XENDCG <: GradientRegression end
 abstract type Pearson <: GradientRegression end
 abstract type LogLoss <: GradientRegression end
 abstract type Poisson <: GradientRegression end
@@ -22,6 +23,7 @@ abstract type CredStd <: Cred end
 const _loss2type_dict = Dict(
     :mse => MSE,
     :lambdarank => LambdaRank,
+    :xendcg => XENDCG,
     :pearson => Pearson,
     :logloss => LogLoss,
     :poisson => Poisson,
@@ -105,6 +107,125 @@ end
 # A group-defined objective defines its own method on this signature instead.
 update_grads!(∇, p, y, ::Type{L}, params::EvoTypes, group) where {L} =
     update_grads!(∇, p, y, L, params)
+
+# Base gradients, then the decorrelation penalty on the gradient rows. See docs/src/dcov-design.md.
+function update_grads!(∇, p, y, ::Type{L}, params::EvoTypes, group, ctrl) where {L}
+    update_grads!(∇, p, y, L, params, group)
+    isnothing(ctrl) && return nothing
+    λ = hasproperty(params, :ctrl_lambda) ? params.ctrl_lambda : 0.0
+    λ > 0 || return nothing
+    K = size(p, 1)
+    for k in ctrl_rows(L, K)
+        _penalize_row!(view(∇, k, :), view(∇, K + k, :), view(∇, 2K + 1, :), view(p, k, :), ctrl, λ)
+    end
+    return nothing
+end
+
+# Penalised rows of `∇`: every output, or each location under `MLE2P`. Hessians are `K` rows below,
+# weights in row `2K + 1`.
+ctrl_rows(::Type{<:GradientRegression}, K) = 1:K
+ctrl_rows(::Type{<:MLE2P}, K) = 1:2:K
+
+# Curvature relative to `:mse`, 1 under `:mse`.
+@inline _curvature(h, w) = w > 0 ? h / (2 * w) : zero(h)
+
+_ctrl_grad!(dc::DcorCache, x::AbstractVector) = dcov2_grad!(dc, x)
+
+function _penalize_row!(grow::AbstractVector{T}, hrow::AbstractVector, wrow::AbstractVector,
+    prow::AbstractVector, ctrl::DcorCache, λ) where {T}
+    g = _ctrl_grad!(ctrl, prow)
+    n = length(grow)
+    λw = λ * ctrl.wbar
+    @inbounds for i in 1:n
+        grow[i] += T(λw * n * g[i] * _curvature(hrow[i], wrow[i]))
+    end
+    return nothing
+end
+
+# Penalty gradient of each group, `λ W_g ∂dcov2_g`, into `ctrl.g`, groups in parallel.
+function _grouped_grad!(ctrl::GroupedDcorCache, prow::AbstractVector, λ)
+    @threads for k in eachindex(ctrl.caches)
+        rows = ctrl.rows[k]
+        gk = _ctrl_grad!(ctrl.caches[k], view(prow, rows))
+        λW = λ * ctrl.Wg[k]
+        @inbounds for (j, i) in enumerate(rows)
+            ctrl.g[i] = λW * gk[j]
+        end
+    end
+    return ctrl.g
+end
+
+function _penalize_row!(grow::AbstractVector{T}, hrow::AbstractVector, wrow::AbstractVector,
+    prow::AbstractVector, ctrl::GroupedDcorCache, λ) where {T}
+    _grouped_grad!(ctrl, prow, λ)
+    # rows of skipped groups carry no penalty
+    @inbounds for rows in ctrl.rows, i in rows
+        grow[i] += T(ctrl.g[i] * _curvature(hrow[i], wrow[i]))
+    end
+    return nothing
+end
+
+# Several controls: pooled controls run in parallel, within groups the groups do.
+function _penalize_row!(grow::AbstractVector{T}, hrow::AbstractVector, wrow::AbstractVector,
+    prow::AbstractVector, ctrl::SummedDcorCache{DcorCache}, λ) where {T}
+    caches, ω, acc = ctrl.caches, ctrl.weights, ctrl.acc
+    @threads for k in eachindex(caches)
+        _ctrl_grad!(caches[k], prow)
+    end
+    _sum_controls!(acc, caches, ω, eachindex(acc))
+    n = length(grow)
+    λw = λ * ctrl.wbar
+    @inbounds for i in 1:n
+        grow[i] += T(λw * n * acc[i] * _curvature(hrow[i], wrow[i]))
+    end
+    return nothing
+end
+
+function _penalize_row!(grow::AbstractVector{T}, hrow::AbstractVector, wrow::AbstractVector,
+    prow::AbstractVector, ctrl::SummedDcorCache{GroupedDcorCache}, λ) where {T}
+    caches, ω, acc = ctrl.caches, ctrl.weights, ctrl.acc
+    for c in caches
+        _grouped_grad!(c, prow, λ)
+    end
+    # rows a control skips hold zeros in its gradient
+    _sum_controls!(acc, caches, ω, ctrl.rows)
+    @inbounds for i in ctrl.rows
+        grow[i] += T(acc[i] * _curvature(hrow[i], wrow[i]))
+    end
+    return nothing
+end
+
+function _sum_controls!(acc, caches, ω, rows)
+    g1 = caches[1].g
+    @inbounds for i in rows
+        acc[i] = ω[1] * g1[i]
+    end
+    for k in 2:length(caches)
+        gk = caches[k].g
+        @inbounds for i in rows
+            acc[i] += ω[k] * gk[i]
+        end
+    end
+    return acc
+end
+
+# The metric the eval penalty is added to; other metrics are reported unchanged.
+_own_metric(::Type{MSE}) = mse
+_own_metric(::Type{LogLoss}) = logloss
+_own_metric(::Type{Poisson}) = poisson
+_own_metric(::Type{Gamma}) = gamma
+_own_metric(::Type{Tweedie}) = tweedie
+_own_metric(::Type{GaussianMLE}) = gaussian_mle
+_own_metric(::Type) = nothing
+
+# Eval penalty: `_dep_coef(L) * dcov2(_dep_transform(L, p), ctrl)`, see docs/src/dcov-design.md.
+_dep_transform(::Type{<:Union{MSE,Gamma,GaussianMLE}}, p) = p
+_dep_transform(::Type{LogLoss}, p) = sigmoid(p)
+_dep_transform(::Type{Poisson}, p) = exp(p)
+_dep_transform(::Type{Tweedie}, p) = exp((2 - 1.5) * p)   # rho = 1.5, as in the loss and its metric
+_dep_coef(::Type{<:Union{MSE,Poisson,Gamma}}) = 1.0
+_dep_coef(::Type{<:Union{LogLoss,GaussianMLE}}) = 0.5
+_dep_coef(::Type{Tweedie}) = 1 / (2 - 1.5)
 
 # LambdaRank, per Burges' "From RankNet to LambdaRank to LambdaMART". Pairs within a query
 # contribute a pairwise logistic cost weighted by the NDCG change a swap would cause. The
@@ -355,6 +476,91 @@ function update_grads!(∇::Matrix{T}, p::Matrix{T}, y::AbstractVecOrMat, ::Type
     isnothing(group) && _pearson_no_group()
     _pearson_grads!(∇, p, y, group)
     return nothing
+end
+
+# XE-NDCG (Bruch, "An Alternative Cross Entropy Loss for Learning-to-Rank", WWW 2021). The paper
+# draws the 1/2 of the target 2^grade - 1/2 from [0, 1] each round; it is fixed here. Scratch is
+# Float64, as Float32 sums over a large query are too coarse for the metric.
+struct XENDCGScratch
+    e::Vector{Float64}
+    a::Vector{Float64}
+end
+XENDCGScratch() = XENDCGScratch(Float64[], Float64[])
+
+# Target masses of a query into `a`, scaled by 2^-max(grade) against overflow. Returns their sum.
+function _xendcg_target!(a::Vector{Float64}, y, rows)
+    resize!(a, length(rows))
+    ymax = -Inf
+    @inbounds for r in rows
+        ymax = max(ymax, Float64(y[r]))
+    end
+    h = exp2(-ymax) / 2
+    tot = 0.0
+    @inbounds for (i, r) in enumerate(rows)
+        a[i] = exp2(Float64(y[r]) - ymax) - h
+        tot += a[i]
+    end
+    return tot
+end
+
+function _xendcg_softmax!(e::Vector{Float64}, p, rows)
+    resize!(e, length(rows))
+    smax = -Inf
+    @inbounds for r in rows
+        smax = max(smax, Float64(p[1, r]))
+    end
+    z = 0.0
+    @inbounds for (i, r) in enumerate(rows)
+        e[i] = exp(Float64(p[1, r]) - smax)
+        z += e[i]
+    end
+    e ./= z
+    return e
+end
+
+# A query weighs by the mean of its rows' weights, as for `:ndcg`.
+function _xendcg_group!(buf::XENDCGScratch, ∇::Matrix{T}, p::Matrix{T}, y, rows) where {T}
+    length(rows) < 2 && return nothing
+    tot = _xendcg_target!(buf.a, y, rows)
+    ρ = _xendcg_softmax!(buf.e, p, rows)
+    w = 0.0
+    @inbounds for r in rows
+        w += ∇[3, r]
+    end
+    w /= length(rows)
+    @inbounds for (i, r) in enumerate(rows)
+        ∇[1, r] = T(w * (ρ[i] - buf.a[i] / tot))
+        ∇[2, r] = T(w * ρ[i] * (1 - ρ[i]))
+    end
+    return nothing
+end
+
+function _xendcg_chunk!(∇::Matrix{T}, p::Matrix{T}, y, group, chunk) where {T}
+    buf = XENDCGScratch()
+    for g in chunk
+        _xendcg_group!(buf, ∇, p, y, group_rows(group, g))
+    end
+    return nothing
+end
+
+# Shared by both backends.
+function _xendcg_grads!(∇::Matrix{T}, p::Matrix{T}, y, group) where {T}
+    fill!(view(∇, 1, :), zero(T))
+    fill!(view(∇, 2, :), zero(T))
+    @threads for chunk in _group_chunks(ngroups(group))
+        _xendcg_chunk!(∇, p, y, group, chunk)
+    end
+    return nothing
+end
+
+_xendcg_no_group() = error(
+    "`loss = :xendcg` requires group information. Pass `group_name` when fitting " *
+    "from a table, or `group_train` when fitting from a matrix."
+)
+
+function update_grads!(∇::Matrix{T}, p::Matrix{T}, y::AbstractVecOrMat, ::Type{XENDCG}, params::EvoTypes, group) where {T}
+    isnothing(group) && _xendcg_no_group()
+    _xendcg_grads!(∇, p, y, group)
 end
 
 function update_grads!(∇::Matrix{T}, p::Matrix{T}, y::AbstractVecOrMat, ::Type{L}, params::EvoTypes) where {T,L<:GradientRegression}

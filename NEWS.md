@@ -2,6 +2,18 @@
 
 ## v0.20.0
 
+### Decorrelation penalty
+- `ctrl_lambda` penalises the dependence between the predictions and one or more control variables, measured by distance covariance, which also captures nonlinear dependence. Pass the controls to `EvoTrees.fit` with `ctrl_name` on a table or `ctrl_train` alongside `x_train`, and their relative weights with `ctrl_weights`.
+- `ctrl_within_group = true` computes the penalty within each group of `group_name` / `group_train`.
+- Available for `:mse`, `:logloss`, `:poisson`, `:gamma`, `:tweedie` and `:gaussian_mle` (on the location), on CPU and GPU.
+- With evaluation data, the loss's own metric includes the penalty, so early stopping follows the penalised objective. The evaluation data then needs the same controls.
+- `ctrl_lambda` scales with the target. Past some `ctrl_lambda * eta` the fit oscillates between rounds, so a larger weight needs a smaller `eta`.
+
+```julia
+config = EvoTreeRegressor(; loss=:mse, ctrl_lambda=10.0, ctrl_within_group=true)
+m = fit(config, dtrain; target_name="y", group_name="group", ctrl_name=["c1", "c2"])
+```
+
 ### Model structure
 - The intercept is stored on `EvoTree` as `bias::Vector{Float32}` (unconstrained / link space). `trees` holds only boosting rounds, so `length(m.trees) == nrounds * bagging_size` (and is empty when `nrounds = 0`).
 - `predict` always applies `bias`, then the first `ntree_limit` trees. `ntree_limit=0` is bias only.
@@ -12,6 +24,10 @@
 - Tree plots now use a **Makie recipe** instead of Plots.jl / RecipesBase. Load a backend (`CairoMakie` or `GLMakie`) and call `treeplot(model)` or `plot(model, 1)`.
 - `RecipesBase` and `NetworkLayout` are no longer dependencies. Layout is computed in EvoTrees; the recipe is a package extension loaded with Makie.
 - Split labels show the comparison (`≤` for numeric/ordered features, `=` for unordered categoricals). Multi-output leaves show every predicted parameter.
+
+### XE-NDCG ranking loss
+- `loss=:xendcg`: the XE-NDCG listwise ranking loss (Bruch, WWW 2021), linear in the size of each group. `metric` defaults to `:xendcg`, the same loss on the evaluation groups.
+- `:lambdarank` and `:xendcg` reject a multi-column target, which `:lambdarank` used to fit on the wrong values.
 
 ### Pearson loss
 - `loss=:pearson` fits the Pearson correlation between the predictions and the target within each group of `group_name` / `group_train`, so it is only available through `EvoTrees.fit`. `metric` defaults to `:pearson`. A matrix target fits one output per column.
